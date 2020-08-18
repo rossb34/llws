@@ -1,6 +1,8 @@
+pub mod handshake;
+
 use byteorder::{ByteOrder};
 
-// OpCode is defined as an integer number between 0 and 15, inclusive
+/// OpCode is defined as an integer number between 0 and 15, inclusive
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum OpCode {
     Continuation,
@@ -12,6 +14,7 @@ pub enum OpCode {
     Reserved(u8),
 }
 
+/// Get OpCode from a u8 type
 impl From<u8> for OpCode {
     fn from(op_code: u8) -> OpCode {
         match op_code {
@@ -26,6 +29,7 @@ impl From<u8> for OpCode {
     }
 }
 
+/// Into a u8 type from an OpCode
 impl Into<u8> for OpCode {
     fn into(self) -> u8 {
         match self {
@@ -40,29 +44,31 @@ impl Into<u8> for OpCode {
     }
 }
 
+/// Web Socket frame header
 pub struct FrameHeader {
-    is_final: bool,
-    op_code: OpCode,
-    mask: Option<[u8; 4]>,
-    payload_length: usize
+    pub is_final: bool,
+    pub op_code: OpCode,
+    pub mask: Option<[u8; 4]>,
+    pub payload_length: usize
 }
 
-// websocket frame reader
+/// Web Socket frame reader
 pub struct FrameReader<'a> {
     // borrow u8 slice, don't take ownership
-    buffer: &'a [u8],
-    is_complete: bool,
+    pub buffer: &'a [u8],
+    pub is_complete: bool,
 
     // frame header info
-    is_final: bool,
-    op_code: OpCode,
-    is_masked: bool,
-    mask: Option<&'a [u8]>,
-    payload_begin: usize,
-    payload_end: usize,
+    pub is_final: bool,
+    pub op_code: OpCode,
+    pub is_masked: bool,
+    pub mask: Option<&'a [u8]>,
+    pub payload_begin: usize,
+    pub payload_end: usize,
 }
 
 impl<'a> FrameReader<'a> {
+    /// Wrap a buffer of bytes to read the web socket frame
     pub fn wrap(buffer: &'a [u8]) -> Self {
         // get the first 16 bytes of the frame header
         let first = buffer[0];
@@ -108,8 +114,7 @@ impl<'a> FrameReader<'a> {
         };
 
         // payload begin index and one-past-the-end index
-        // TODO: does it make sense to use raw pointers for begin and end like I would in C++?
-        //  ... probably not safe
+        // TODO: should I use raw pointers for begin and end like I would in C++? ... probably not safe
         let payload_begin = pos;
 
         // payload end index is position + payload length
@@ -130,32 +135,45 @@ impl<'a> FrameReader<'a> {
         }
     }
 
+    /// Get the payload
     pub fn payload(&self) -> &[u8] {
         self.buffer[self.payload_begin..self.payload_end].as_ref()
     }
 
+    /// Get the length of the payload
     pub fn payload_len(&self) -> usize {
         self.payload_end - self.payload_begin
     }
 
+    /// Get a pointer to the beginning of the payload
     pub fn payload_ptr(&self) -> *const u8 {
         unsafe {self.buffer.as_ptr().add(self.payload_begin) }
     }
 }
 
+/// Web Socket frame writer
 pub struct FrameWriter<'a> {
     buffer: &'a mut [u8],
     next_pos: usize,
+    mask: Option<[u8; 4]>,
 }
 
 impl<'a> FrameWriter<'a> {
+    /// Wrap the buffer of bytes to
     pub fn wrap(buffer: &'a mut [u8]) -> Self {
         FrameWriter {
             buffer,
             next_pos: 0,
+            mask: None
         }
     }
 
+    /// Get the length of the frame
+    pub fn frame_len(&self) -> usize {
+        self.next_pos
+    }
+
+    /// Write the frame header
     pub fn push_back_header(&mut self, header: &FrameHeader) {
         let op_code: u8 = header.op_code.into();
 
@@ -200,9 +218,11 @@ impl<'a> FrameWriter<'a> {
             let end = self.next_pos + 4;
             self.next_pos = end;
             self.buffer[begin..end].copy_from_slice(mask);
+            self.mask = header.mask.clone();
         }
     }
 
+    /// Write the data payload
     pub fn push_back_payload(&mut self, payload: &[u8]) {
         let remaining = self.buffer.len() - self.next_pos;
         if payload.len() > remaining {
@@ -214,11 +234,30 @@ impl<'a> FrameWriter<'a> {
         let end = self.next_pos + payload.len();
         self.next_pos = end;
         self.buffer[begin..end].copy_from_slice(payload);
+
+        // apply mask to the payload
+        if let Some(mask) = self.mask {
+            apply_mask(&mut self.buffer[begin..end], mask)
+        }
     }
 }
 
-pub struct RangeError;
+/// Generate a mask key
+pub fn generate_mask() -> [u8; 4] {
+    rand::random()
+}
 
+/// Apply the mask key
+fn apply_mask(buf: &mut [u8], mask: [u8; 4]) {
+    for (i, byte) in buf.iter_mut().enumerate() {
+        *byte ^= mask[i & 3];
+    }
+}
+
+/// Payload length of a web socket frame
+///
+/// The payload length is represented as a tuple where the first element is the actual length and
+/// the second element is the byte length as defined in the protocol
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum PayloadLength {
     U8 (u8, u8),
@@ -226,6 +265,7 @@ enum PayloadLength {
     U64 (u64, u8)
 }
 
+/// Get the byte length
 fn get_byte(payload: &PayloadLength) -> u8 {
     match payload {
         PayloadLength::U8(_l, b) => *b,
@@ -234,6 +274,7 @@ fn get_byte(payload: &PayloadLength) -> u8 {
     }
 }
 
+/// Get PayloadLength from a length
 impl From<usize> for PayloadLength {
     fn from(length: usize) -> Self {
         if length < 126 {
@@ -246,9 +287,81 @@ impl From<usize> for PayloadLength {
     }
 }
 
+
+const MAX_MESSAGE_SIZE: usize = 65536;
+
+/// Assemble a complete and valid frame
+pub struct FrameAssembler {
+    offset: usize,
+    // TODO: use an IoVec or IoSlice?
+    frame_buffer: [u8; MAX_MESSAGE_SIZE],
+}
+
+impl FrameAssembler {
+    /// Allocate a new instance of a frame assembler
+    pub fn new() -> Self {
+        FrameAssembler {
+            offset: 0,
+            frame_buffer: [0 as u8; MAX_MESSAGE_SIZE],
+        }
+    }
+
+    /// Read from a slice of bytes
+    ///
+    /// The callback function is called when a complete and valid frame is read
+    pub fn read(&mut self, buffer: &[u8], handler: fn(op_code: u8, buffer: &[u8])) {
+        // update internal buffer
+        // TODO: avoid the memcpy from buffer to internal buffer
+        let end = self.offset + buffer.len();
+        self.frame_buffer[self.offset..end].copy_from_slice(buffer);
+
+        let mut next = 0;
+        while next < end {
+            // wrap the buffer to try to read a frame
+            let frame_reader = FrameReader::wrap(&self.frame_buffer[next..end]);
+
+            // incomplete frame occurs when payload end is past the end of the buffer
+            if !frame_reader.is_complete {
+                // at least 1 complete frame was read so we need to do a memmove of the remaining
+                // bytes that compose the beginning of the partial message
+                if next > 0 {
+                    // length to copy is beginning of the partial frame to the end of the buffer
+                    let len_to_copy = end - next;
+
+                    // memmove of [next..end] to start index offset
+                    // self.frame_buffer.copy_within(next..end, next);
+                    self.frame_buffer.copy_within(next..end, 0);
+
+                    // update offset to the length copied
+                    self.offset = len_to_copy;
+                } else {
+                    // update offset to the end of the buffer
+                    self.offset = end;
+                }
+                // break out of the while loop
+                break;
+            }
+
+            // complete frame
+            // call the function callback with the op code and payload
+            handler(
+                frame_reader.op_code.into(),
+                &frame_reader.buffer[frame_reader.payload_begin..frame_reader.payload_end],
+            );
+
+            // advance next to the start of the next frame
+            next += frame_reader.payload_end;
+
+            // reset the offset to 0 whenever a complete frame is read
+            self.offset = 0;
+        }
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
-    use crate::{OpCode, PayloadLength, get_byte, FrameHeader, FrameWriter, FrameReader};
+    use crate::{OpCode, PayloadLength, get_byte, FrameHeader, FrameWriter, FrameReader, FrameAssembler};
 
     #[test]
     fn op_code_from_u8() {
@@ -348,4 +461,86 @@ mod tests {
         assert_eq!(false, frame_reader.is_masked);
         // assert_eq!(payload_str.as_bytes(), frame_reader.payload());
     }
+
+    #[test]
+    fn assemble_complete_message() {
+        let payload_str = "hello";
+        let payload_len = payload_str.as_bytes().len();
+        let header = FrameHeader {
+            is_final: true,
+            op_code: OpCode::Text,
+            mask: None,
+            payload_length: payload_len
+        };
+
+        let mut buffer = [0 as u8; 1024];
+        let mut frame_writer = FrameWriter::wrap(&mut buffer[..]);
+        frame_writer.push_back_header(&header);
+        frame_writer.push_back_payload(payload_str.as_bytes());
+        let frame_len = frame_writer.frame_len();
+
+        let mut frame_assembler = FrameAssembler::new();
+
+        fn handler(op_code: u8, buffer: &[u8]) {
+            assert_eq!(OpCode::Text, OpCode::from(op_code));
+            assert_eq!("hello", String::from_utf8_lossy(buffer).as_ref());
+        }
+
+        frame_assembler.read(&buffer[0..frame_len], handler);
+    }
+
+    #[test]
+    fn assemble_incomplete_message() {
+        let payload_str = "hello";
+        let payload_len = payload_str.as_bytes().len();
+        let header = FrameHeader {
+            is_final: true,
+            op_code: OpCode::Text,
+            mask: None,
+            payload_length: payload_len
+        };
+
+        let mut buffer = [0 as u8; 1024];
+        let mut frame_writer = FrameWriter::wrap(&mut buffer[..]);
+        frame_writer.push_back_header(&header);
+        frame_writer.push_back_payload(payload_str.as_bytes());
+        let frame_len = frame_writer.frame_len();
+
+        let mut frame_assembler = FrameAssembler::new();
+
+        fn handler(op_code: u8, buffer: &[u8]) {
+            panic!("incomplete messages should never call the callback!")
+        }
+
+        frame_assembler.read(&buffer[0..(frame_len-1)], handler);
+    }
+
+    #[test]
+    fn assemble_partial_message() {
+        let payload_str = "hello";
+        let payload_len = payload_str.as_bytes().len();
+        let header = FrameHeader {
+            is_final: true,
+            op_code: OpCode::Text,
+            mask: None,
+            payload_length: payload_len
+        };
+
+        let mut buffer = [0 as u8; 1024];
+        let mut frame_writer = FrameWriter::wrap(&mut buffer[..]);
+        frame_writer.push_back_header(&header);
+        frame_writer.push_back_payload(payload_str.as_bytes());
+        let frame_len = frame_writer.frame_len();
+
+        let mut frame_assembler = FrameAssembler::new();
+
+        fn handler(op_code: u8, buffer: &[u8]) {
+            assert_eq!(OpCode::Text, OpCode::from(op_code));
+            assert_eq!("hello", String::from_utf8_lossy(buffer).as_ref());
+        }
+
+        frame_assembler.read(&buffer[0..(frame_len-2)], handler);
+        frame_assembler.read(&buffer[(frame_len-2)..frame_len], handler);
+    }
+
 }
