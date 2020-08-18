@@ -9,3 +9,9 @@ description = "A low level web socket reader and writer library"
 
 [dependencies]
 byteorder = "1"
+http = "0.2"
+httparse = "1.3.4"
+base64 = "0.12.0"
+rand = "0.7.2"
+sha-1 = "0.9"
+digest = "0.9.0"
